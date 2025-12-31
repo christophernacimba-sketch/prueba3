@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Sistema de Control y Monitoreo</title>
+
+<style>
+body {
+  background:#0b0f14;
+  color:#e0f2ff;
+  font-family:Arial, Helvetica, sans-serif;
+  text-align:center;
+}
+h1 { color:#4fc3f7; }
+h2 { color:#81d4fa; font-weight:normal; }
+h3 { color:#4fc3f7; }
+
+.box {
+  border:1px solid #1e2a38;
+  padding:18px;
+  margin:20px auto;
+  width:340px;
+  background:#111821;
+}
+.value {
+  font-size:2em;
+  color:#fff;
+}
+button {
+  padding:10px 20px;
+  font-size:15px;
+  margin:6px;
+  background:#263238;
+  color:#e0f2ff;
+  border:1px solid #4fc3f7;
+  cursor:pointer;
+}
+button:hover {
+  background:#4fc3f7;
+  color:#000;
+}
+.led {
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  margin:8px auto;
+  background:gray;
+}
+.row {
+  display:flex;
+  justify-content:center;
+  gap:20px;
+}
+canvas {
+  background:#000;
+  border:1px solid #1e2a38;
+}
+ul { padding-left:20px; }
+</style>
+</head>
+
+<body>
+
+<h1>Sistema de Control y Monitoreo</h1>
+<h2>Automatización e Instrumentación</h2>
+<p><b>Autores:</b> William Pallo, Christopher Nacimba</p>
+<p style="color:#81d4fa;">SISTEMA DE PREDICCIÓN DE FALLOS INDUSTRIALES</p>
+
+<button onclick="connect()">Conectar Bluetooth</button>
+<p id="status">Estado: Desconectado</p>
+
+<!-- ================= GESTO 1 ================= -->
+<div class="row">
+  <div class="box">
+    <h3>Gestos 1 – Bobinado</h3>
+    <div class="value" id="g1">0.0000</div>
+    <p>Máx: <span id="g1max">0.0000</span></p>
+  </div>
+  <canvas id="osc1" width="160" height="80"></canvas>
+</div>
+
+<!-- ================= GESTO 2 ================= -->
+<div class="row">
+  <div class="box">
+    <h3>Gestos 2 – Rodamiento</h3>
+    <div class="value" id="g2">0.0000</div>
+    <p>Máx: <span id="g2max">0.0000</span></p>
+  </div>
+  <canvas id="osc2" width="160" height="80"></canvas>
+</div>
+
+<!-- ================= MOTOR ================= -->
+<div class="box">
+  <h3>CONTROL MOTOR</h3>
+  <button onclick="rearme()">REARME</button>
+  <div id="motorLed" class="led"></div>
+  <p id="motorTxt">Motor: OFF</p>
+</div>
+
+<!-- ================= LUBRICACIÓN ================= -->
+<div class="box">
+  <h3>SISTEMA DE LUBRICACIÓN</h3>
+  <button onclick="lubricar()">LUBRICAR</button>
+  <button onclick="detenerLub()">DETENER</button>
+  <div id="lubLed" class="led"></div>
+  <p id="lubTxt">Lubricador: OFF</p>
+</div>
+
+<!-- ================= HISTÓRICO ================= -->
+<div class="box">
+  <h3>Histórico de Fallas</h3>
+  <ul id="historial"></ul>
+</div>
+
+<script>
+let characteristic, rxCharacteristic;
+let g1max=0, g2max=0;
+let buf1=Array(80).fill(0);
+let buf2=Array(80).fill(0);
+let historial=[], ultimaFalla="";
+
+// ---------------- BLE ----------------
+async function connect() {
+  const device = await navigator.bluetooth.requestDevice({
+    filters: [{ name: "ESP32_GESTOS" }],
+    optionalServices: ["6e400001-b5a3-f393-e0a9-e50e24dcca9e"]
+  });
+  const server = await device.gatt.connect();
+  const service = await server.getPrimaryService("6e400001-b5a3-f393-e0a9-e50e24dcca9e");
+  characteristic = await service.getCharacteristic("6e400003-b5a3-f393-e0a9-e50e24dcca9e");
+  rxCharacteristic = await service.getCharacteristic("6e400002-b5a3-f393-e0a9-e50e24dcca9e");
+  characteristic.startNotifications();
+  characteristic.addEventListener("characteristicvaluechanged", handleData);
+  document.getElementById("status").innerText="Estado: Conectado";
+}
+
+// ---------------- DATA ----------------
+function handleData(e) {
+  const t=new TextDecoder().decode(e.target.value).split(",");
+  let g1=parseFloat(t[0].split(":")[1]);
+  let g2=parseFloat(t[1].split(":")[1]);
+  let motor=t[2].split(":")[1];
+  let falla=t[3].split(":")[1];
+
+  g1max=Math.max(g1max,g1); g2max=Math.max(g2max,g2);
+  g1max.toFixed(4); g2max.toFixed(4);
+
+  document.getElementById("g1").innerText=g1.toFixed(4);
+  document.getElementById("g2").innerText=g2.toFixed(4);
+  document.getElementById("g1max").innerText=g1max.toFixed(4);
+  document.getElementById("g2max").innerText=g2max.toFixed(4);
+
+  actualizarMotor(motor,falla);
+  osc(buf1,g1,"osc1","#4fc3f7");
+  osc(buf2,g2,"osc2","#00e676");
+
+  if(motor==="OFF" && falla!=="NONE" && falla!==ultimaFalla){
+    historial.unshift(`${new Date().toLocaleTimeString()} → ${falla}`);
+    historial=historial.slice(0,6);
+    document.getElementById("historial").innerHTML=historial.map(h=>`<li>${h}</li>`).join("");
+    ultimaFalla=falla;
+  }
+  if(motor==="ON") ultimaFalla="";
+}
+
+// ---------------- OSCILOSCOPIO ----------------
+function osc(buf,val,id,color){
+  buf.push(val); buf.shift();
+  const c=document.getElementById(id).getContext("2d");
+  c.clearRect(0,0,160,80);
+  c.strokeStyle=color;
+  c.beginPath();
+  buf.forEach((v,i)=>{
+    let y=40 - (v*30); // escala corregida
+    c.lineTo(i*2, y);
+  });
+  c.stroke();
+}
+
+// ---------------- ESTADOS ----------------
+function actualizarMotor(m,f){
+  const led=document.getElementById("motorLed");
+  const txt=document.getElementById("motorTxt");
+  if(m==="ON"){led.style.background="green";txt.innerText="Motor: ON";}
+  else if(f==="BOBINADO"){led.style.background="red";txt.innerText="Falla: Bobinado";}
+  else if(f==="RODAMIENTO"){led.style.background="orange";txt.innerText="Falla: Rodamiento";}
+}
+
+// ---------------- COMANDOS ----------------
+function rearme(){ rxCharacteristic.writeValue(new TextEncoder().encode("REARME")); }
+function lubricar(){
+  rxCharacteristic.writeValue(new TextEncoder().encode("LUB_ON"));
+  document.getElementById("lubLed").style.background="blue";
+  document.getElementById("lubTxt").innerText="Lubricador: ON";
+}
+function detenerLub(){
+  rxCharacteristic.writeValue(new TextEncoder().encode("LUB_OFF"));
+  document.getElementById("lubLed").style.background="gray";
+  document.getElementById("lubTxt").innerText="Lubricador: OFF";
+}
+</script>
+
+</body>
+</html>
